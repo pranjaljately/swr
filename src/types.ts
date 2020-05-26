@@ -5,14 +5,15 @@ export interface ConfigInterface<
   Fn extends fetcherFn<Data> = fetcherFn<Data>
 > {
   errorRetryInterval?: number
+  errorRetryCount?: number
   loadingTimeout?: number
   focusThrottleInterval?: number
   dedupingInterval?: number
-
   refreshInterval?: number
   refreshWhenHidden?: boolean
   refreshWhenOffline?: boolean
   revalidateOnFocus?: boolean
+  revalidateOnMount?: boolean
   revalidateOnReconnect?: boolean
   shouldRetryOnError?: boolean
   fetcher?: Fn
@@ -58,11 +59,12 @@ export type triggerInterface = (
   key: keyInterface,
   shouldRevalidate?: boolean
 ) => void
+type mutateCallback<Data = any> = (currentValue: Data) => Promise<Data> | Data
 export type mutateInterface<Data = any> = (
   key: keyInterface,
-  data: Data | Promise<Data>,
+  data?: Data | Promise<Data> | mutateCallback<Data>,
   shouldRevalidate?: boolean
-) => void
+) => Promise<Data | undefined>
 export type broadcastStateInterface<Data = any, Error = any> = (
   key: string,
   data: Data,
@@ -72,6 +74,10 @@ export type responseInterface<Data, Error> = {
   data?: Data
   error?: Error
   revalidate: () => Promise<boolean>
+  mutate: (
+    data?: Data | Promise<Data> | mutateCallback<Data>,
+    shouldRevalidate?: boolean
+  ) => Promise<Data | undefined>
   isValidating: boolean
 }
 export type revalidateType = (
@@ -95,10 +101,10 @@ export type pageOffsetMapperType<Offset, Data, Error> = (
   index: number
 ) => Offset
 
-export type pagesResponseInterface = {
+export type pagesResponseInterface<Data, Error> = {
   pages: any
   pageCount: number
-  pageSWRs: responseInterface<any, any>[]
+  pageSWRs: responseInterface<Data, Error>[]
   isLoadingMore: boolean
   isReachingEnd: boolean
   isEmpty: boolean
@@ -110,3 +116,16 @@ export type actionType<Data, Error> = {
   error?: Error
   isValidating?: boolean
 }
+
+export interface CacheInterface {
+  get(key: keyInterface): any
+  set(key: keyInterface, value: any, shouldNotify?: boolean): any
+  keys(): string[]
+  has(key: keyInterface): boolean
+  delete(key: keyInterface, shouldNotify?: boolean): void
+  clear(shouldNotify?: boolean): void
+  serializeKey(key: keyInterface): [string, any, string]
+  subscribe(listener: cacheListener): () => void
+}
+
+export type cacheListener = () => void

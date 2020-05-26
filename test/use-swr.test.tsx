@@ -7,7 +7,8 @@ import {
 } from '@testing-library/react'
 import React, { ReactNode, Suspense, useEffect, useState } from 'react'
 
-import useSWR, { mutate, SWRConfig, trigger } from '../src'
+import useSWR, { mutate, SWRConfig, trigger, cache } from '../src'
+import Cache from '../src/cache'
 
 class ErrorBoundary extends React.Component<{ fallback: ReactNode }> {
   state = { hasError: false }
@@ -78,6 +79,35 @@ describe('useSWR', () => {
     expect(container.firstChild.textContent).toMatchInlineSnapshot(
       `"hello, SWR"`
     )
+  })
+
+  it('should not call fetch function when revalidateOnMount is false', async () => {
+    const fetch = jest.fn(() => 'SWR')
+
+    function Page() {
+      const { data } = useSWR('revalidateOnMount', fetch, {
+        revalidateOnMount: false
+      })
+      return <div>hello, {data}</div>
+    }
+
+    render(<Page />)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('should call fetch function when revalidateOnMount is true even if initialData is set', async () => {
+    const fetch = jest.fn(() => 'SWR')
+
+    function Page() {
+      const { data } = useSWR('revalidateOnMount', fetch, {
+        revalidateOnMount: true,
+        initialData: 'gab'
+      })
+      return <div>hello, {data}</div>
+    }
+
+    render(<Page />)
+    expect(fetch).toHaveBeenCalled()
   })
 
   it('should dedupe requests by default', async () => {
@@ -419,7 +449,11 @@ describe('useSWR - refresh', () => {
         refreshInterval: int,
         dedupingInterval: 100
       })
-      return <div onClick={() => setInt(int + 100)}>count: {data}</div>
+      return (
+        <div onClick={() => setInt(num => (num < 400 ? num + 100 : 0))}>
+          count: {data}
+        </div>
+      )
     }
     const { container } = render(<Page />)
     expect(container.firstChild.textContent).toMatchInlineSnapshot(`"count: "`)
@@ -459,6 +493,16 @@ describe('useSWR - refresh', () => {
       return new Promise(res => setTimeout(res, 300))
     })
     expect(container.firstChild.textContent).toMatchInlineSnapshot(`"count: 4"`)
+    await act(() => {
+      return new Promise(res => setTimeout(res, 110))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"count: 5"`)
+    await act(() => {
+      fireEvent.click(container.firstElementChild)
+      // it will clear 400ms timer and stop
+      return new Promise(res => setTimeout(res, 110))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"count: 5"`)
     await act(() => {
       return new Promise(res => setTimeout(res, 110))
     })
@@ -698,6 +742,36 @@ describe('useSWR - error', () => {
   })
 })
 
+it('should trigger limited error retries if errorRetryCount exists', async () => {
+  let count = 0
+  function Page() {
+    const { data, error } = useSWR(
+      'error-5',
+      () => {
+        return new Promise((_, rej) =>
+          setTimeout(() => rej(new Error('error: ' + count++)), 100)
+        )
+      },
+      {
+        errorRetryCount: 1,
+        errorRetryInterval: 50,
+        dedupingInterval: 0
+      }
+    )
+    if (error) return <div>{error.message}</div>
+    return <div>hello, {data}</div>
+  }
+  const { container } = render(<Page />)
+
+  expect(container.firstChild.textContent).toMatchInlineSnapshot(`"hello, "`)
+  await waitForDomChange({ container })
+  expect(container.firstChild.textContent).toMatchInlineSnapshot(`"error: 0"`)
+  await act(() => new Promise(res => setTimeout(res, 210))) // retry
+  expect(container.firstChild.textContent).toMatchInlineSnapshot(`"error: 1"`)
+  await act(() => new Promise(res => setTimeout(res, 210))) // retry
+  expect(container.firstChild.textContent).toMatchInlineSnapshot(`"error: 1"`)
+})
+
 describe('useSWR - focus', () => {
   afterEach(cleanup)
 
@@ -775,6 +849,29 @@ describe('useSWR - local mutation', () => {
     expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 1"`)
   })
 
+  it('should trigger revalidation programmatically within a dedupingInterval', async () => {
+    let value = 0
+
+    function Page() {
+      const { data } = useSWR('dynamic-12', () => value++, {
+        dedupingInterval: 2000
+      })
+      return <div>data: {data}</div>
+    }
+    const { container } = render(<Page />)
+
+    // hydration
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: "`)
+    await waitForDomChange({ container }) // mount
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+    await act(() => {
+      // trigger revalidation
+      trigger('dynamic-12')
+      return new Promise(res => setTimeout(res, 1))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 1"`)
+  })
+
   it('should mutate the cache and revalidate', async () => {
     let value = 0
 
@@ -793,6 +890,32 @@ describe('useSWR - local mutation', () => {
     await act(() => {
       // mutate and revalidate
       mutate('dynamic-8', 'mutate')
+      return new Promise(res => setTimeout(res, 1))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 1"`)
+  })
+
+  it('should dedupe extra requests after mutation', async () => {
+    let value = 0
+
+    function Page() {
+      const { data } = useSWR('dynamic-13', () => value++, {
+        dedupingInterval: 2000
+      })
+      useSWR('dynamic-13', () => value++, {
+        dedupingInterval: 2000
+      })
+      return <div>data: {data}</div>
+    }
+    const { container } = render(<Page />)
+
+    // hydration
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: "`)
+    await waitForDomChange({ container }) // mount
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+    await act(() => {
+      // mutate and revalidate
+      mutate('dynamic-13')
       return new Promise(res => setTimeout(res, 1))
     })
     expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 1"`)
@@ -846,11 +969,80 @@ describe('useSWR - local mutation', () => {
       // mutate and revalidate
       return mutate(
         'mutate-1',
-        new Promise(res => setTimeout(() => res(999), 100))
+        new Promise(res => setTimeout(() => res(999), 100)),
+        false
       )
     })
     await act(() => new Promise(res => setTimeout(res, 110)))
     expect(container.textContent).toMatchInlineSnapshot(`"data: 999"`)
+  })
+
+  it('should trigger on mutation without data', async () => {
+    let value = 0
+
+    function Page() {
+      const { data } = useSWR('dynamic-14', () => value++, {
+        dedupingInterval: 0
+      })
+      return <div>data: {data}</div>
+    }
+    const { container } = render(<Page />)
+
+    // hydration
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: "`)
+    await waitForDomChange({ container }) // mount
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+    await act(() => {
+      // trigger revalidation
+      mutate('dynamic-14')
+      return new Promise(res => setTimeout(res, 1))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 1"`)
+  })
+
+  it('should call function as data passing current cached value', async () => {
+    // prefill cache with data
+    cache.set('dynamic-15', 'cached data')
+    const callback = jest.fn()
+    await mutate('dynamic-15', callback)
+    expect(callback).toHaveBeenCalledWith('cached data')
+  })
+
+  it('should return results of the mutation', async () => {
+    // returns the data if promise resolved
+    expect(mutate('dynamic-16', Promise.resolve('data'))).resolves.toBe('data')
+
+    // throw the error if promise rejected
+    expect(
+      mutate('dynamic-16', Promise.reject(new Error('error')))
+    ).rejects.toBeInstanceOf(Error)
+  })
+
+  it('should get bound mutate from useSWR', async () => {
+    function Page() {
+      // eslint-disable-next-line no-shadow
+      const { data, mutate: boundMutate } = useSWR(
+        'dynamic-17',
+        () => 'fetched'
+      )
+      return (
+        <div onClick={() => boundMutate('mutated', false)}>data: {data}</div>
+      )
+    }
+    const { container } = render(<Page />)
+
+    // hydration
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: "`)
+    await waitForDomChange({ container }) // mount
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"data: fetched"`
+    )
+    // call bound mutate
+    fireEvent.click(container.firstElementChild)
+    // expect new updated value
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"data: mutated"`
+    )
   })
 
   it('should ignore in flight requests when mutating', async () => {
@@ -1103,5 +1295,189 @@ describe('useSWR - suspense', () => {
     // fixes https://github.com/zeit/swr/issues/57
     // 'suspense-7' -> undefined -> 'suspense-8'
     expect(renderedResults).toEqual(['suspense-7', 'suspense-8'])
+  })
+})
+
+describe('useSWR - cache', () => {
+  it('should react to direct cache updates', async () => {
+    cache.set('cache-1', 'custom cache message')
+
+    function Page() {
+      const { data } = useSWR('cache-1', () => 'random message', {
+        suspense: true
+      })
+      return <div>{data}</div>
+    }
+
+    // render using custom cache
+    const { queryByText, findByText } = render(
+      <React.Suspense fallback={null}>
+        <Page />
+      </React.Suspense>
+    )
+
+    // content should come from custom cache
+    expect(queryByText('custom cache message')).toMatchInlineSnapshot(`
+      <div>
+        custom cache message
+      </div>
+    `)
+
+    // content should be updated with fetcher results
+    expect(await findByText('random message')).toMatchInlineSnapshot(`
+      <div>
+        random message
+      </div>
+    `)
+
+    act(() => cache.set('cache-1', 'a different message'))
+
+    // content should be updated from new cache value
+    expect(await findByText('a different message')).toMatchInlineSnapshot(`
+      <div>
+        a different message
+      </div>
+    `)
+
+    act(() => cache.delete('cache-1'))
+
+    // content should go back to be the fetched value
+    expect(await findByText('random message')).toMatchInlineSnapshot(`
+      <div>
+        random message
+      </div>
+    `)
+  })
+
+  it('should notify subscribers when a cache item changed', async () => {
+    // create new cache instance to don't get affected by other tests
+    // updating the normal cache instance
+    const tmpCache = new Cache()
+
+    const listener = jest.fn()
+    const unsubscribe = tmpCache.subscribe(listener)
+    tmpCache.set('cache-2', 'random message')
+
+    expect(listener).toHaveBeenCalled()
+
+    unsubscribe()
+    tmpCache.set('cache-2', 'a different message')
+
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('useSWR - key', () => {
+  afterEach(cleanup)
+
+  it('should respect requests after key has changed', async () => {
+    let rerender
+
+    function Page() {
+      const [mounted, setMounted] = useState(0)
+      const key = `key-1-${mounted ? 'short' : 'long'}`
+      const { data } = useSWR(key, async () => {
+        if (mounted) {
+          await new Promise(res => setTimeout(res, 100))
+          return 'short request'
+        }
+        await new Promise(res => setTimeout(res, 200))
+        return 'long request'
+      })
+      useEffect(() => setMounted(1), [])
+      rerender = setMounted
+
+      return <div>{data}</div>
+    }
+
+    const { container } = render(<Page />)
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`""`)
+    await waitForDomChange({ container })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"short request"`
+    )
+    await act(() => new Promise(res => setTimeout(res, 110))) // wait 100ms until "long request" finishes
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"short request"`
+    ) // should be "short request" still
+
+    // manually trigger a re-render from outside
+    // this triggers a re-render, and a read access to `swr.data`
+    // but the result should still be "short request"
+    await act(() => rerender(x => x + 1))
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"short request"`
+    )
+  })
+
+  it('should render undefined after key has changed', async () => {
+    function Page() {
+      const [mounted, setMounted] = useState(false)
+      const key = `key-${mounted ? '1' : '0'}`
+      const { data } = useSWR(key, async k => {
+        await new Promise(res => setTimeout(res, 200))
+        return k
+      })
+      useEffect(() => {
+        setTimeout(() => setMounted(true), 320)
+      }, [])
+      return <div>{data}</div>
+    }
+
+    //    time     data       key
+    // -> 0        undefined, '0'
+    // -> 200      0,         '0'
+    // -> 320      undefined, '1' <- this state is required; we can't show 0 here
+    // -> 520      1,         '1'
+    const { container } = render(<Page />)
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`""`) // undefined, time=0
+    await act(() => new Promise(res => setTimeout(res, 210)))
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"key-0"`) // 0, time=210
+    await act(() => new Promise(res => setTimeout(res, 200)))
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`""`) // undefined, time=410
+    await act(() => new Promise(res => setTimeout(res, 140)))
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"key-1"`) // 1, time=550
+  })
+
+  it('should return undefined after key change when fetcher is synchronized', async () => {
+    const samples = {
+      '1': 'a',
+      '2': 'b',
+      '3': 'c'
+    }
+
+    function Page() {
+      const [sampleKey, setKey] = React.useState(1)
+      const { data } = useSWR(
+        `key-2-${sampleKey}`,
+        key => samples[key.replace('key-2-', '')]
+      )
+      return (
+        <div
+          onClick={() => {
+            setKey(sampleKey + 1)
+          }}
+        >
+          hello, {sampleKey}:{data}
+        </div>
+      )
+    }
+    const { container } = render(<Page />)
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 1:"`
+    )
+    await waitForDomChange({ container }) // mount
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 1:a"`
+    )
+    fireEvent.click(container.firstElementChild)
+    // first rerender on key change
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 2:"`
+    )
+    await act(() => new Promise(res => setTimeout(res, 100)))
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 2:b"`
+    )
   })
 })
